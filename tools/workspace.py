@@ -8,12 +8,17 @@ import sys
 import os
 import fnmatch
 
+from terminaltables import AsciiTable
+from operator import itemgetter
+
 WS_LIST = "/workspace/list"
 WS_STATUS = "/workspace/get-status"
 WS_MKDIRS = "/workspace/mkdirs"
 WS_IMPORT = "/workspace/import"
 WS_EXPORT = "/workspace/export"
 LS_ZONES = "/clusters/list-zones"
+#
+WS_LIST = "/workspace/list"
 
 error_401 = """
 Credentials are incorrect. Please verify the credentials passed into the APIs.
@@ -25,16 +30,19 @@ This will create a new password for you to use against the REST API. This should
 """
 
 
-class WorkspaceClient:
+class WorkspaceClient(object):
     """A class to define wrappers for the REST API"""
 
-    def __init__(self, host="https://myenv.cloud.databricks.com", user="admin", pwd="fakePassword", is_shared=False):
+    # NLZ -- I would probably remove the defaults here, since they aren't useful
+    # (there's no "default" situation in which they do anything)
+    def __init__(self, host="https://myenv.cloud.databricks.com", user="admin", pwd="fakePassword", is_shared=False, debug = False):
         self.user = user
         self.pwd = pwd
         self.creds = (user, pwd)
         self.host = host
         self.is_shared = is_shared
         self.url = host.rstrip('/') + '/api/2.0'
+        self.debug = debug
 
     def get(self, endpoint, json_params={}, print_json=False):
         url = self.url + endpoint
@@ -67,6 +75,9 @@ class WorkspaceClient:
         else:
             return {'http_status_code': raw_results.status_code}
 
+    # NLZ — I don't honestly know how this is different than
+    # def my_map(F, items):
+    #   return list(map(F, items))
     @staticmethod
     def my_map(F, items):
         to_return = []
@@ -77,13 +88,17 @@ class WorkspaceClient:
 
     def is_file(self, path):
         """ Checks if the file is a notebook or folder in Databricks"""
+        if path=='/':
+            return False
         status = {'path': path}
         resp = self.get(WS_STATUS, json_params=status)
         if resp.get('error_code', None):
             print(resp)
             raise NameError('File does not exist in Databricks workspace.')
-        print("Is the path a file or folder: ")
-        print(resp)
+        # I added a debug property to this class to make this quieter.
+        if self.debug:
+            print("Is the path a file or folder: ")
+            print(resp)
         if resp['object_type'] == 'DIRECTORY':
             return False
         return True
@@ -242,6 +257,25 @@ class WorkspaceClient:
         else:
             self.push_folder(path)
 
+    def ls(self, path):
+        def printer(file_info):
+            if file_info['object_type'] == "NOTEBOOK":
+                return file_info['language'].ljust(10)+file_info['path']
+            elif file_info['object_type'] == "DIRECTORY":
+                return file_info['object_type'].ljust(10)+file_info['path']
+            else:
+                raise Exception("Don't understand object type {}".format(file_info['object_type']))
+        full_path = self.get_full_path(path)
+        if self.is_file(full_path):
+            #
+            file_info = self.get(WS_STATUS, json_params={"path": full_path})
+            return printer(file_info)
+        else:
+            #return json.dumps(self.get(WS_LIST, json_params={"path": self.get_full_path(path)}), indent=4)
+            dir_info = self.get(WS_LIST, json_params={"path": full_path})['objects']
+            # we are exploiting the fact that 'DIRECTORY' comes before 'NOTEBOOK' in a lexical sort
+            # to list the directories first
+            return '\n'.join(printer(x) for x in sorted(dir_info, key=itemgetter('object_type', 'path')))
 
 if __name__ == '__main__':
     to_skip = False
@@ -265,6 +299,7 @@ if __name__ == '__main__':
     sp = parser.add_subparsers(dest='action')
     sp_push = sp.add_parser('push', help='Push path to Databricks workspace')
     sp_pull = sp.add_parser('pull', help='Pull workspace from Databricks to local directory')
+    sp_ls = sp.add_parser('ls', help='List workspace')
 
     parser.add_argument('--user', dest='user', help='Username for the Databricks env')
     parser.add_argument('--password', dest='password', help='Password for the Databricks env')
@@ -312,5 +347,7 @@ if __name__ == '__main__':
             helper.push(input_path)
         elif args.action.lower() == "pull":
             helper.pull(input_path)
+        elif args.action.lower() == "ls":
+            print(helper.ls(input_path))
         else:
             print("Push / pull are only supported as the action.")
