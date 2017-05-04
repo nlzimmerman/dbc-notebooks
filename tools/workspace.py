@@ -8,7 +8,6 @@ import sys
 import os
 import fnmatch
 
-from terminaltables import AsciiTable
 from operator import itemgetter
 
 WS_LIST = "/workspace/list"
