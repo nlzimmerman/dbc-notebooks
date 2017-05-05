@@ -8,6 +8,7 @@ import sys
 import os
 import fnmatch
 
+import re
 from operator import itemgetter
 
 WS_LIST = "/workspace/list"
@@ -118,10 +119,11 @@ class WorkspaceClient(object):
         else:
             raise ValueError('Path should start with . for relative paths or / for absolute.')
 
-    def save_single_notebook(self, fullpath):
+    def save_single_notebook(self, fullpath, destpath=None, mkdir=False):
         """ Saves a single notebook from Databricks to the local directory"""
         get_args = {'path': fullpath}
         resp = self.get(WS_EXPORT, get_args)
+        # resp['file_type'] is undocumented, but 'py' seems to be a normal value
         if resp.get('error_code', None):
             if to_skip:
                 print('\n\nSkipping file due to error :' + fullpath + '\n\n')
@@ -131,9 +133,38 @@ class WorkspaceClient(object):
                 raise NameError('File does not exist in Databricks workspace.')
         # grab the relative path from the constructed full path
         # this code chops of the /Users/mwc@example.com/ to create a local reference
-        save_filename = '/'.join(fullpath.split('/')[3:]) + '.' + resp['file_type']
-        if self.is_shared:
-            save_filename = self.user.split("@")[0] + '/' + save_filename
+
+        if destpath is None:
+            save_filename = '/'.join(fullpath.split('/')[3:]) + '.' + resp['file_type']
+            # I'm trying not to break is_shared, but I never use it - NLZ
+            if self.is_shared:
+                save_filename = self.user.split("@")[0] + '/' + save_filename
+        else:
+            # this will be true if destpath is a filename
+            if re.match('.*'+resp['file_type']+'$', destpath):
+                save_filename = destpath
+            # if destpath is not a filename, we assume it is a directory on our
+            # local filesystem. As is normal for unix utilities, we won't create
+            # directories that don't exist, so let's check that
+            else:
+                # we're setting this here to dry up the code.
+                save_filename = (
+                    destpath.rstrip('/') +
+                    '/' +
+                    fullpath.split('/')[-1] +
+                    '.' +
+                    resp['file_type']
+                )
+                if os.path.isdir(destpath):
+                    pass # we already took care of this before
+                else:
+                    if not mkdir:
+                        raise Exception("Destination appears not to be a directory or a filename")
+                    else:
+                        os.mkdir(destpath) # we already set save_filename
+
+        #elif re.match( )
+
         save_path = os.path.dirname(save_filename)
         print("Local path to save: " + save_path)
         print("Saving file in local path: " + save_filename)
@@ -143,7 +174,7 @@ class WorkspaceClient(object):
         with open(save_filename, "wb") as f:
             f.write(base64.b64decode(resp['content']))
 
-    def get_all_notebooks(self, fullpath):
+    def get_all_notebooks(self, fullpath, destpath=None, basepath=""):
         """ Recursively list all notebooks within the folder"""
         get_args = {'path': fullpath}
         items = self.get(WS_LIST, get_args)['objects']
@@ -158,28 +189,31 @@ class WorkspaceClient(object):
             return []
         # save the notebooks with the current method
         if notebooks:
-            self.my_map(lambda y: self.save_single_notebook(y), notebooks)
+            if destpath is not None:
+                self.my_map(lambda y: self.save_single_notebook(y, destpath+'/'+basepath, mkdir=True), notebooks)
+            else:
+                self.my_map(lambda y: self.save_single_notebook(y), notebooks)
         if folders:
-            nested_list_notebooks = list(self.my_map(lambda y: self.get_all_notebooks(y), folders))
+            nested_list_notebooks = list(self.my_map(lambda y: self.get_all_notebooks(y, destpath, basepath=basepath.rstrip('/')+'/'+y.split('/')[-1]), folders))
             flatten_list = [item for sublist in nested_list_notebooks for item in sublist]
             return notebooks + flatten_list
         return notebooks
 
-    def save_folder(self, fullpath):
+    def save_folder(self, fullpath, dest=None):
         """ We will save the notebooks within the paths, and exclude Library links """
-        list_of_notebooks = self.get_all_notebooks(fullpath)
+        list_of_notebooks = self.get_all_notebooks(fullpath, dest)
         return list_of_notebooks
         # Run map of save_single_notebook across list of notebooks
 
-    def pull(self, path):
+    def pull(self, path, dest=None):
         # get_args = "/Users/mwc@databricks.com/demo/reddit/Reddit SQL Analysis"
         cur_path = self.get_full_path(path)
 
         # pull the file or archive
         if self.is_file(cur_path):
-            self.save_single_notebook(cur_path)
+            self.save_single_notebook(cur_path, dest)
         else:
-            self.save_folder(cur_path)
+            self.save_folder(cur_path, dest)
 
     @staticmethod
     def _parse_extension(src_path):
@@ -295,12 +329,25 @@ if __name__ == '__main__':
     DBC_SHARED is set to true if the single repo needs to host multiple home directories.
     It creates a local directory from the users e-mail
     """)
-    # subparser for mutually exclusive arguments
-    sp = parser.add_subparsers(dest='action')
-    sp_push = sp.add_parser('push', help='Push path to Databricks workspace')
-    sp_pull = sp.add_parser('pull', help='Pull workspace from Databricks to local directory')
-    sp_ls = sp.add_parser('ls', help='List workspace')
 
+    # subparser for mutually exclusive arguments
+    # sp = parser.add_subparsers(dest='action')
+    # sp_push = sp.add_parser('push', help='Push path to Databricks workspace')
+    # sp_pull = sp.add_parser('pull', help='Pull workspace from Databricks to local directory')
+    # sp_ls = sp.add_parser('ls', help='List workspace')
+    parser.add_argument(
+        'action',
+        choices=("push", "pull", "ls"),
+        help="Push, pull, or list databricks workspace"
+    )
+    parser.add_argument('path', #type=str,
+                        help='The path/directory in Databricks or locally to sync',
+                        nargs='+'
+                        )
+    # path.add_argument('path2', #type=str,
+    #                     help='The path/directory in Databricks or locally to sync',
+    #                     nargs='?'
+    #                     )
     parser.add_argument('--user', dest='user', help='Username for the Databricks env')
     parser.add_argument('--password', dest='password', help='Password for the Databricks env')
     parser.add_argument('--host', dest='host', help='Password for the Databricks env')
@@ -311,10 +358,11 @@ if __name__ == '__main__':
     parser.add_argument('--skip', dest='to_skip', action='store_true',
                         help='Boolean to skip any errors or not')
 
-    parser.add_argument('path', type=str,
-                        help='The path/directory in Databricks or locally to sync')
+
 
     args = parser.parse_args()
+    # print(args)
+    # sys.exit(0)
     # the arguments
     user = args.user
     host = args.host
@@ -346,8 +394,16 @@ if __name__ == '__main__':
         if args.action.lower() == "push":
             helper.push(input_path)
         elif args.action.lower() == "pull":
-            helper.pull(input_path)
+            if len(input_path) == 1:
+                helper.pull(input_path[0])
+            elif len(input_path) == 2:
+                helper.pull(input_path[0], input_path[1])
+            else:
+                raise NotImplementedError("Right now we don't know how to pull multiple files")
         elif args.action.lower() == "ls":
-            print(helper.ls(input_path))
+            if len(input_path) == 1:
+              print(helper.ls(input_path[0]))
+            else:
+              raise Exception("Can only ls one location at a time.")
         else:
             print("Push / pull are only supported as the action.")
