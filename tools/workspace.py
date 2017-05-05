@@ -260,9 +260,10 @@ class WorkspaceClient(object):
         def printer(file_info):
             if file_info['object_type'] == "NOTEBOOK":
                 return file_info['language'].ljust(10)+file_info['path']
-            elif file_info['object_type'] == "DIRECTORY":
+            elif file_info['object_type'] in ("DIRECTORY", "LIBRARY"):
                 return file_info['object_type'].ljust(10)+file_info['path']
             else:
+                print(json.dumps(file_info))
                 raise Exception("Don't understand object type {}".format(file_info['object_type']))
         full_path = self.get_full_path(path)
         if self.is_file(full_path):
